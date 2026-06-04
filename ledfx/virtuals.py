@@ -854,8 +854,13 @@ class Virtual:
             return True
 
         frame = self.assembled_frame
-        if frame is not None and frame.any():
-            # Something to show -> keep transmitting, reset the silence timer.
+        # "Black" = no pixel bright enough to light a visible LED. Use a small
+        # threshold rather than exact zero: reactive effects decay through
+        # sub-1 fractional values on silence that display as black but are not
+        # exactly 0, which would otherwise keep the silence timer from ever
+        # starting.
+        if frame is not None and frame.max() >= 1.0:
+            # Something visible to show -> keep transmitting, reset the timer.
             self._silence_start = None
             return True
 
