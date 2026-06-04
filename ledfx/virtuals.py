@@ -838,38 +838,33 @@ class Virtual:
         return self._active_effect
 
     def _should_flush(self):
-        """Decide whether to transmit this frame.
+        """Decide whether to transmit the current assembled frame.
 
         When ``revert_on_silence`` is enabled, transmission stops after
-        ``silence_timeout`` seconds of continuous audio silence (volume at or
-        below the core ``min_volume`` threshold). Once we stop sending, a
-        realtime device (e.g. WLED) times out and reverts to its underlying
-        state — restoring whatever was driving it before (the Kauf switch
-        state, in Igor's setup). Any audio above threshold resumes transmission
-        immediately. Default-off, so upstream behaviour is unchanged.
+        ``silence_timeout`` seconds during which the effect output stays fully
+        black (nothing to show). Once we stop sending, a realtime device (e.g.
+        WLED) times out and reverts to its underlying state — restoring whatever
+        was driving it before (the Kauf switch state, in Igor's setup). This
+        mirrors a delta-encoded sender that simply never transmits "all zeros",
+        and unlike a volume gate it is immune to a noisy audio-source floor that
+        keeps the measured level above ``min_volume`` while the effect still
+        renders black. Default-off, so upstream behaviour is unchanged.
         """
         if not self._config.get("revert_on_silence"):
             return True
 
-        audio = getattr(self._ledfx, "audio", None)
-        if audio is None:
-            return True
-
-        try:
-            silent = audio.volume(filtered=True) <= audio._config["min_volume"]
-        except (AttributeError, KeyError, TypeError):
-            return True
-
-        if not silent:
+        frame = self.assembled_frame
+        if frame is not None and frame.any():
+            # Something to show -> keep transmitting, reset the silence timer.
             self._silence_start = None
             return True
 
         now = time.perf_counter()
         if self._silence_start is None:
             self._silence_start = now
-        # Keep flushing through the debounce window (so the last frames we send
-        # are the effect's silent/black output); after the timeout we go quiet
-        # and let the device's own realtime timeout perform the revert.
+        # Keep flushing through the debounce window (so the last frames the
+        # device sees are black); after the timeout we go quiet and let the
+        # device's own realtime timeout perform the revert.
         return (now - self._silence_start) < self._config.get(
             "silence_timeout", 1.0
         )
