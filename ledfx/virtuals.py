@@ -119,6 +119,21 @@ class Virtual:
                 description="90 Degree rotations",
                 default=0,
             ): vol.All(vol.Coerce(int), vol.Range(min=0, max=3)),
+            vol.Optional(
+                "revert_on_silence",
+                description="Stop transmitting after a period of audio silence so "
+                "the device reverts to its underlying (non-realtime) state",
+                default=False,
+            ): bool,
+            vol.Optional(
+                "silence_timeout",
+                description="Seconds of continuous silence before transmission stops "
+                "(only used when revert_on_silence is enabled)",
+                default=1.0,
+            ): vol.All(
+                vol.Coerce(float),
+                vol.Range(min=0, max=30, min_included=True, max_included=True),
+            ),
         }
     )
 
@@ -203,6 +218,7 @@ class Virtual:
         self.fallback_timer = None
         self.fallback_suppress_transition = False
         self._streaming = False
+        self._silence_start = None
         self.complex_segments = self._config.get("complex_segments", False)
 
         # Precompiled device remap structure for fast pixel mapping
@@ -821,6 +837,43 @@ class Virtual:
     def active_effect(self):
         return self._active_effect
 
+    def _should_flush(self):
+        """Decide whether to transmit this frame.
+
+        When ``revert_on_silence`` is enabled, transmission stops after
+        ``silence_timeout`` seconds of continuous audio silence (volume at or
+        below the core ``min_volume`` threshold). Once we stop sending, a
+        realtime device (e.g. WLED) times out and reverts to its underlying
+        state — restoring whatever was driving it before (the Kauf switch
+        state, in Igor's setup). Any audio above threshold resumes transmission
+        immediately. Default-off, so upstream behaviour is unchanged.
+        """
+        if not self._config.get("revert_on_silence"):
+            return True
+
+        audio = getattr(self._ledfx, "audio", None)
+        if audio is None:
+            return True
+
+        try:
+            silent = audio.volume(filtered=True) <= audio._config["min_volume"]
+        except (AttributeError, KeyError, TypeError):
+            return True
+
+        if not silent:
+            self._silence_start = None
+            return True
+
+        now = time.perf_counter()
+        if self._silence_start is None:
+            self._silence_start = now
+        # Keep flushing through the debounce window (so the last frames we send
+        # are the effect's silent/black output); after the timeout we go quiet
+        # and let the device's own realtime timeout perform the revert.
+        return (now - self._silence_start) < self._config.get(
+            "silence_timeout", 1.0
+        )
+
     def thread_function(self):
         while True:
             if not self._active:
@@ -844,7 +897,7 @@ class Virtual:
                     # )
                     self.assembled_frame = self.assemble_frame()
                     if self.assembled_frame is not None and not self._paused:
-                        if not self._config["preview_only"]:
+                        if not self._config["preview_only"] and self._should_flush():
                             # self._ledfx.thread_executor.submit(self.flush)
                             # await self._ledfx.loop.run_in_executor(
                             #     self._ledfx.thread_executor, self.flush
